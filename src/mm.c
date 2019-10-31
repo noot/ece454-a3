@@ -43,7 +43,8 @@ team_t team = {
 #define DSIZE       (2 * WSIZE)            /* doubleword size (bytes) */
 #define CHUNKSIZE   (1<<7)      /* initial heap size (bytes) */
 
-#define MAX(x,y) ((x) > (y)?(x) :(y))
+#define MAX(x,y) ((x) > (y)?(x) : (y))
+#define MIN(x,y) ((x) < (y)?(x) : (y))
 
 /* Pack a size and allocated bit into a word */
 #define PACK(size, alloc) ((size) | (alloc))
@@ -65,6 +66,12 @@ team_t team = {
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 void* heap_listp = NULL;
+void *free_list = NULL;
+
+typedef struct node {
+    struct node *prev;
+    struct node *next;
+} linked_list_t;
 
 /**********************************************************
  * mm_init
@@ -253,20 +260,60 @@ void *mm_realloc(void *ptr, size_t size)
     if (ptr == NULL)
       return (mm_malloc(size));
 
-    void *oldptr = ptr;
+    //void *oldptr = ptr;
     void *newptr;
-    size_t copySize;
+    //size_t copySize;
+    size_t newSize = size;
 
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-      return NULL;
+    if (newSize < DSIZE) {
+        newSize = DSIZE;
+    } 
 
-    /* Copy the old data. */
-    copySize = GET_SIZE(HDRP(oldptr));
-    if (size < copySize)
-      copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
+    newSize += CHUNKSIZE;
+
+    // size diff between current allocated size and requested size
+    int diff = newSize - GET_SIZE(HDRP(ptr));
+
+    if (diff > 0) {
+        int extra;
+        // check if next block is epilogue, if so, extend the heap
+        if (!GET_SIZE(HDRP(NEXT_BLKP(ptr))) || !GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) {
+            // check if the extra amount of space we need is greater than what's in the next block
+            extra = diff - GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+            // if it's greater, 
+            if (extra > 0) {
+                int extension = MAX(extra, DSIZE);
+                if (extend_heap(extra) == NULL) {
+                    printf("cannot extend heap");
+                    return NULL;
+                }
+
+               extra += extension;
+            }
+
+            // put block header
+            PUT(HDRP(ptr), PACK(newSize + extra, 1));
+            // put block footer
+            PUT(FTRP(ptr), PACK(newSize + extra, 1));
+        } else {
+            newptr = mm_malloc(newSize - DSIZE);
+            memmove(newptr, ptr, MIN(size, newSize));
+            mm_free(ptr);   
+        }
+    }
+
+
+
+    // newptr = mm_malloc(size);
+    // if (newptr == NULL)
+    //   return NULL;
+
+    // /* Copy the old data. */
+    //copySize = GET_SIZE(HDRP(oldptr));
+    // if (size < copySize)
+    //   copySize = size;
+    // memcpy(newptr, oldptr, copySize);
+    // mm_free(oldptr);
     return newptr;
 }
 
@@ -276,5 +323,9 @@ void *mm_realloc(void *ptr, size_t size)
  * Return nonzero if the heap is consistant.
  *********************************************************/
 int mm_check(void){
-  return 1;
+  // char *bp = heap_listp;
+
+  // printf("heap");
+
+    return 0;
 }
