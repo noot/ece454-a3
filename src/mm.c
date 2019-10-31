@@ -65,13 +65,26 @@ team_t team = {
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
-void* heap_listp = NULL;
-void *free_list = NULL;
+/* Previous and next blocks on the free list */
+#define PREV_BLK(bp) (*(char **)(bp))
+#define NEXT_BLK(bp) (*(char **)(NEXT_PTR(bp)))
 
-typedef struct node {
-    struct node *prev;
-    struct node *next;
-} linked_list_t;
+/* Previous and next block's addresses */
+#define PREV_PTR(bp) ((char *)(bp))
+#define NEXT_PTR(bp) ((char *)(bp) + WSIZE)
+
+#define NUM_LISTS 28
+
+// the number of different segregated free lists
+// sizes start from 1 word (8 bytes) up to 2**28
+void* heap_listp = NULL;
+void *free_list[NUM_LISTS];
+
+// insert and delete from free lists
+void insert(void *ptr, size_t size);
+void delete(void *ptr);
+// return index of free list given a size
+int list_index(size_t size);
 
 /**********************************************************
  * mm_init
@@ -87,6 +100,10 @@ typedef struct node {
      PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, 1));   // prologue footer
      PUT(heap_listp + (3 * WSIZE), PACK(0, 1));    // epilogue header
      heap_listp += DSIZE;
+
+     for (int i = 0; i < NUM_LISTS; i++) {
+        free_list[i] = NULL;
+     }
 
      return 0;
  }
@@ -106,6 +123,8 @@ void *coalesce(void *bp)
     size_t size = GET_SIZE(HDRP(bp));
 
     if (prev_alloc && next_alloc) {       /* Case 1 */
+        // TODO: move coalesced block to corresponding free list
+        //insert(bp, size);
         return bp;
     }
 
@@ -153,6 +172,8 @@ void *extend_heap(size_t words)
     PUT(FTRP(bp), PACK(size, 0));                // free block footer
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));        // new epilogue header
 
+    insert(bp, size);
+
     /* Coalesce if the previous block was free */
     return coalesce(bp);
 }
@@ -188,6 +209,21 @@ void place(void* bp, size_t asize)
 
   PUT(HDRP(bp), PACK(bsize, 1));
   PUT(FTRP(bp), PACK(bsize, 1));
+
+  delete(bp);
+}
+
+// return index of free list corresponding to size
+int list_index(size_t size) {
+    int i;
+    for(i = 0; i < NUM_LISTS; i++) {
+        size >>= 1;
+        if (size < 1) {
+           break; 
+        }
+    }
+
+    return i;
 }
 
 /**********************************************************
@@ -202,9 +238,74 @@ void mm_free(void *bp)
     size_t size = GET_SIZE(HDRP(bp));
     PUT(HDRP(bp), PACK(size,0));
     PUT(FTRP(bp), PACK(size,0));
+
+    // TODO: put node back in list
+    insert(bp, size);
+
     coalesce(bp);
 }
 
+
+void insert(void *bp, size_t size) {
+    int idx = list_index(size);
+
+    void *parent_ptr = free_list[idx];
+    void *child_ptr;
+
+    // traverse free list until we find the spot to insert the block
+    while ((parent_ptr != NULL) && (size > GET_SIZE(HDRP(parent_ptr)))) {
+        child_ptr = parent_ptr;
+        parent_ptr = PREV_BLK(parent_ptr);
+    }
+
+    // node goes after the parent and before the entry 
+    // parent <- node <- child <- ... <- list_head
+    if (child_ptr != NULL && parent_ptr != NULL) {
+        PUT(PREV_PTR(parent_ptr), bp);
+        PUT(NEXT_PTR(child_ptr), bp);
+        PUT(PREV_PTR(bp), child_ptr);
+        PUT(NEXT_PTR(bp), parent_ptr);
+        return;
+    } else if (child_ptr != NULL && parent_ptr == NULL) {
+        PUT(PREV_PTR(bp), child_ptr);
+        PUT(NEXT_PTR(child_ptr), bp);
+        PUT(NEXT_PTR(bp), NULL);
+        return;
+    } else if (child_ptr == NULL && parent_ptr != NULL) {
+        PUT(PREV_PTR(parent_ptr), bp);
+        PUT(NEXT_PTR(bp), parent_ptr);
+        PUT(PREV_PTR(bp), NULL);
+    } else {
+        PUT(PREV_PTR(bp), NULL);
+        PUT(NEXT_PTR(bp), NULL);
+    }
+
+    free_list[idx] = bp;
+}
+
+void delete(void *bp) {
+    int size = GET_SIZE(bp);
+    int idx = list_index(size);
+
+    void *list_head = free_list[idx];
+
+    // child <- bp <- parent <- ... <- list_head
+
+    void *parent = PREV_BLK(bp);
+    void *child = NEXT_BLK(bp);
+    if (parent != NULL && child != NULL) {
+        PUT(PREV_PTR(parent), NEXT_BLK(bp));
+        PUT(NEXT_PTR(child), PREV_BLK(bp));
+    } else if (parent == NULL && child != NULL) {
+        PUT(PREV_PTR(child), NULL);
+        free_list[idx] = child;
+    } else if (child == NULL && parent != NULL) {
+        PUT(NEXT_PTR(parent), NULL);
+    } else {
+        free_list[idx] = NULL;
+    }
+
+}
 
 /**********************************************************
  * mm_malloc
@@ -230,17 +331,24 @@ void *mm_malloc(size_t size)
     else
         asize = DSIZE * ((size + (DSIZE) + (DSIZE-1))/ DSIZE);
 
-    /* Search the free list for a fit */
-    if ((bp = find_fit(asize)) != NULL) {
-        place(bp, asize);
-        return bp;
+    int idx = list_index(asize);
+
+    // iterate through free list to find list that fits block
+    bp = free_list[idx];
+    // iterate through chosen list to find block that is just less than requested size
+    while ((bp != NULL) && asize > GET_SIZE(HDRP(bp))) {
+        bp = PREV_BLK(bp);
+    } 
+
+    // extend heap if we can't find the right size block
+    if (bp == NULL) {
+        extendsize = MAX(asize, CHUNKSIZE);
+        if ((bp = extend_heap(extendsize)) == NULL)
+            return NULL;       
     }
 
-    /* No fit found. Get more memory and place the block */
-    extendsize = MAX(asize, CHUNKSIZE);
-    if ((bp = extend_heap(extendsize/WSIZE)) == NULL)
-        return NULL;
     place(bp, asize);
+
     return bp;
 
 }
