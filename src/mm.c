@@ -60,12 +60,12 @@ team_t team = {
 #define PREV_BLKP(bp) ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 /* Previous and next blocks on the free list */
-#define PREV_BLK(bp) (*(char **)(PREV_PTR(bp)))
-#define NEXT_BLK(bp) (*(char **)(NEXT_PTR(bp)))
+#define PREV_FREE_BLK(bp) (*(char **)(PREV_FREE_PTR(bp)))
+#define NEXT_FREE_BLK(bp) (*(char **)(NEXT_FREE_PTR(bp)))
 
 /* Previous and next block's addresses */
-#define PREV_PTR(bp) ((char *)(bp))
-#define NEXT_PTR(bp) ((char *)(bp) + WSIZE)
+#define PREV_FREE_PTR(bp) ((char *)(bp))
+#define NEXT_FREE_PTR(bp) ((char *)(bp) + WSIZE)
 
 #define NUM_LISTS 20
 
@@ -93,8 +93,8 @@ void insert(void *ptr, size_t size);
 void delete(void *ptr);
 // return index of free list given a size
 int list_index(size_t size);
+void *split_block(void *bp, size_t size);
 int mm_check();
-
 
 /**********************************************************
  * mm_init
@@ -204,18 +204,67 @@ void *extend_heap(size_t words)
  * Return NULL if no free blocks can handle that size
  * Assumed that asize is aligned
  **********************************************************/
-// void * find_fit(size_t asize)
-// {
-//     void *bp;
-//     for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
-//     {
-//         if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
-//         {
-//             return bp;
-//         }
-//     }
-//     return NULL;
-// }
+void * find_fit(size_t asize)
+{
+    int idx = list_index(asize);
+
+    // iterate through free list to find list that fits block
+    void *bp = NULL;
+    // TODO: possibly search in reverse so we can split big blocks?
+    for (int i = NUM_LISTS; i < NUM_LISTS; i++) {
+        void *bp = free_list[i];
+        while (bp != NULL) {
+            // if free block fits requested size, break and return
+            if (asize <= GET_SIZE(HDRP(bp))) {
+                DEBUG_PRINTF("find_fit found fit block %x size %d\n", bp, GET_SIZE(HDRP(bp)));
+                // split block if i != idx 
+                // free block is in a list that holds blocks larger than needed
+                if (i != idx && GET_SIZE(HDRP(bp)) > asize + 2*DSIZE) bp = split_block(bp, asize);
+                return bp;
+            }
+            bp = PREV_FREE_BLK(bp);
+        }  
+        //if (bp != NULL) return bp;
+    }
+
+    return bp;
+}
+
+// split a block into a block that has size `size` and a remainder which is the original size of
+// the block minus `size`
+// add the remainder block to free list
+void *split_block(void *bp, size_t size) {
+    int current_size = GET_SIZE(HDRP(bp));
+    int remainder = current_size - size;
+    if (remainder < 2*DSIZE) {
+        // can't split block
+        return bp;
+    }   
+
+    delete(bp);
+
+    void *remainder_ptr = NEXT_BLKP(bp);
+    PUT(HDRP(bp), PACK(size, 0));
+    PUT(FTRP(bp), PACK(size, 0));
+    PUT(HDRP(remainder_ptr), PACK(size, 0));
+    PUT(FTRP(remainder_ptr), PACK(size, 0));
+
+    insert(bp, size);
+    insert(remainder_ptr, remainder);
+
+    return bp;
+}
+
+// return index of free list corresponding to size
+int list_index(size_t size) {
+    int i;
+    for(i = 0; i < NUM_LISTS; i++) {
+        size >>= 1;
+        if (size < 1) break;
+    }
+
+    return i;
+}
 
 /**********************************************************
  * place
@@ -230,17 +279,6 @@ void place(void* bp, size_t asize)
   PUT(FTRP(bp), PACK(bsize, 1));
 
   delete(bp);
-}
-
-// return index of free list corresponding to size
-int list_index(size_t size) {
-    int i;
-    for(i = 0; i < NUM_LISTS; i++) {
-        size >>= 1;
-        if (size < 1) break;
-    }
-
-    return i;
 }
 
 /**********************************************************
@@ -274,34 +312,33 @@ void insert(void *bp, size_t size) {
     // traverse free list until we find the spot to insert the block
     while ((parent_ptr != NULL) && (size > GET_SIZE(HDRP(parent_ptr)))) {
         child_ptr = parent_ptr;
-        parent_ptr = PREV_BLK(parent_ptr);
+        parent_ptr = PREV_FREE_BLK(parent_ptr);
     }
 
     // node goes after the parent and before the entry 
     // parent <- node <- child <- ... <- list_head
     if (child_ptr != NULL && parent_ptr != NULL) {
-        PUT(PREV_PTR(parent_ptr), bp);
-        PUT(NEXT_PTR(child_ptr), bp);
-        PUT(PREV_PTR(bp), child_ptr);
-        PUT(NEXT_PTR(bp), parent_ptr);
+        PUT(PREV_FREE_PTR(parent_ptr), bp);
+        PUT(NEXT_FREE_PTR(child_ptr), bp);
+        PUT(PREV_FREE_PTR(bp), child_ptr);
+        PUT(NEXT_FREE_PTR(bp), parent_ptr);
         return;
     } else if (child_ptr != NULL && parent_ptr == NULL) {
-        PUT(PREV_PTR(bp), child_ptr);
-        PUT(NEXT_PTR(child_ptr), bp);
-        PUT(NEXT_PTR(bp), NULL);
+        PUT(PREV_FREE_PTR(bp), child_ptr);
+        PUT(NEXT_FREE_PTR(child_ptr), bp);
+        PUT(NEXT_FREE_PTR(bp), NULL);
         return;
     } else if (child_ptr == NULL && parent_ptr != NULL) {
-        PUT(PREV_PTR(parent_ptr), bp);
-        PUT(NEXT_PTR(bp), parent_ptr);
-        PUT(PREV_PTR(bp), NULL);
+        PUT(PREV_FREE_PTR(parent_ptr), bp);
+        PUT(NEXT_FREE_PTR(bp), parent_ptr);
+        PUT(PREV_FREE_PTR(bp), NULL);
     } else {
-        PUT(PREV_PTR(bp), NULL);
-        PUT(NEXT_PTR(bp), NULL);
+        PUT(PREV_FREE_PTR(bp), NULL);
+        PUT(NEXT_FREE_PTR(bp), NULL);
     }
 
     DEBUG_PRINTF("inserting into free list: size=%d bytes\n", size);
 
-    print_free_list();
     free_list[idx] = bp;
 }
 
@@ -313,16 +350,16 @@ void delete(void *bp) {
 
     // child <- bp <- parent <- ... <- list_head
 
-    void *parent = PREV_BLK(bp);
-    void *child = NEXT_BLK(bp);
+    void *parent = PREV_FREE_BLK(bp);
+    void *child = NEXT_FREE_BLK(bp);
     if (parent != NULL && child != NULL) {
-        PUT(PREV_PTR(child), parent);
-        PUT(NEXT_PTR(parent), child);
+        PUT(PREV_FREE_PTR(child), parent);
+        PUT(NEXT_FREE_PTR(parent), child);
     } else if (parent == NULL && child != NULL) {
-        PUT(PREV_PTR(child), NULL);
+        PUT(PREV_FREE_PTR(child), NULL);
         free_list[idx] = child;
     } else if (child == NULL && parent != NULL) {
-        PUT(NEXT_PTR(parent), NULL);
+        PUT(NEXT_FREE_PTR(parent), NULL);
     } else {
         free_list[idx] = NULL;
     }
@@ -344,6 +381,8 @@ void *mm_malloc(size_t size)
     size_t extendsize; /* amount to extend heap if no fit */
     char * bp;
 
+    print_free_list();
+
     /* Ignore spurious requests */
     if (size == 0)
         return NULL;
@@ -357,18 +396,21 @@ void *mm_malloc(size_t size)
     DEBUG_PRINTF("malloc: size=%d bytes\n", size);
     int idx = list_index(asize);
 
-    // iterate through free list to find list that fits block
-    bp = free_list[idx];
-    //void* pp = bp;
-    // iterate through chosen list to find block that fits requested size
-    for (int i = idx; i < NUM_LISTS; i++) {
-        while (bp != NULL && asize > GET_SIZE(HDRP(bp))) {
-            //pp = bp;
-            bp = PREV_BLK(bp);
-        } 
-        if (bp != NULL) break;
-    }
+    DEBUG_PRINTF("malloc list_idx %d\n", idx);
 
+    // iterate through free list to find list that fits block
+    // bp = free_list[idx];
+    // //void* pp = bp;
+    // // iterate through chosen list to find block that fits requested size
+    // for (int i = idx; i < NUM_LISTS; i++) {
+    //     while (bp != NULL && asize > GET_SIZE(HDRP(bp))) {
+    //         //pp = bp;
+    //         bp = PREV_BLK(bp);
+    //     } 
+    //     if (bp != NULL) break;
+    // }
+
+    bp = find_fit(asize);
 
     //bp = pp;
     // extend heap if we can't find the right size block
@@ -397,6 +439,7 @@ void *mm_realloc(void *ptr, size_t size)
       mm_free(ptr);
       return NULL;
     }
+
     /* If oldptr is NULL, then this is just malloc. */
     if (ptr == NULL)
       return (mm_malloc(size));
@@ -404,44 +447,46 @@ void *mm_realloc(void *ptr, size_t size)
     //void *oldptr = ptr;
     void *newptr = NULL;
     // //size_t copySize;
-    // size_t newSize = size;
+    size_t newSize = size;
 
-    // if (newSize < DSIZE) {
-    //     newSize = DSIZE;
-    // } 
+    if (newSize < DSIZE) {
+        newSize = DSIZE;
+    } else {
+        newSize = DSIZE * ((newSize + (DSIZE) + (DSIZE-1))/ DSIZE);
+    }
 
-    // newSize += CHUNKSIZE;
+    newSize += CHUNKSIZE;
 
-    // // size diff between current allocated size and requested size
-    // int diff = newSize - GET_SIZE(HDRP(ptr));
+    // size diff between current allocated size and requested size
+    int diff = newSize - GET_SIZE(HDRP(ptr));
 
-    // if (diff > 0) {
-    //     int extra;
-    //     // check if next block is epilogue, if so, extend the heap
-    //     if (!GET_SIZE(HDRP(NEXT_BLKP(ptr))) || !GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) {
-    //         // check if the extra amount of space we need is greater than what's in the next block
-    //         extra = diff - GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-    //         // if it's greater, 
-    //         if (extra > 0) {
-    //             int extension = MAX(extra, DSIZE);
-    //             if (extend_heap(extra) == NULL) {
-    //                 printf("cannot extend heap");
-    //                 return NULL;
-    //             }
+    if (diff > 0) {
+        int extra;
+        // check if next block is epilogue, if so, extend the heap
+        if (!GET_SIZE(HDRP(NEXT_BLKP(ptr))) || !GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) {
+            // check if the extra amount of space we need is greater than what's in the next block
+            extra = diff - GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+            // if it's greater, 
+            if (extra > 0) {
+                int extension = MAX(extra, DSIZE);
+                if (extend_heap(extra) == NULL) {
+                    printf("cannot extend heap");
+                    return NULL;
+                }
 
-    //            extra += extension;
-    //         }
+               extra += extension;
+            }
 
-    //         // put block header
-    //         PUT(HDRP(ptr), PACK(newSize + extra, 1));
-    //         // put block footer
-    //         PUT(FTRP(ptr), PACK(newSize + extra, 1));
-    //     } else {
-    //         newptr = mm_malloc(newSize - DSIZE);
-    //         memmove(newptr, ptr, MIN(size, newSize));
-    //         mm_free(ptr);   
-    //     }
-    // }
+            // put block header
+            PUT(HDRP(ptr), PACK(newSize + extra, 1));
+            // put block footer
+            PUT(FTRP(ptr), PACK(newSize + extra, 1));
+        } else {
+            newptr = mm_malloc(newSize - DSIZE);
+            memmove(newptr, ptr, MIN(size, newSize));
+            mm_free(ptr);   
+        }
+    }
 
     // newptr = mm_malloc(size);
     // if (newptr == NULL)
@@ -474,7 +519,7 @@ void print_free_list() {
         void *ptr = free_list[i];
         while (ptr != NULL) {
             DEBUG_PRINTF("free block idx %d 0x%x size %d\n", i, ptr, GET_SIZE(HDRP(ptr)));
-            ptr = PREV_BLK(ptr);
+            ptr = PREV_FREE_BLK(ptr);
         }
     }
 }
