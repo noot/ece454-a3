@@ -36,6 +36,7 @@ team_t team = {
 #define WSIZE       sizeof(void *)            /* word size (bytes) */
 #define DSIZE       (2 * WSIZE)            /* doubleword size (bytes) */
 #define CHUNKSIZE   (1<<7)      /* initial heap size (bytes) */
+#define MINSIZE     (2 * DSIZE)
 
 #define MAX(x,y) ((x) > (y)?(x) : (y))
 #define MIN(x,y) ((x) < (y)?(x) : (y))
@@ -76,12 +77,6 @@ team_t team = {
 #else
     #define DEBUG_PRINTF(...)
 #endif
-
-typedef struct free_block {
-    size_t size;
-    struct free_block *prev;
-    struct free_block *next;
-} free_block_t;
 
 // the number of different segregated free lists
 // sizes start from 1 word (8 bytes) up to 2**28
@@ -147,7 +142,7 @@ void *coalesce(void *bp)
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
         insert(bp, size);
-        return (bp);
+        return bp;
     } else if (!prev_alloc && next_alloc) { /* Case 3 */
         delete(prev_block);
         size += GET_SIZE(HDRP(prev_block));
@@ -158,7 +153,7 @@ void *coalesce(void *bp)
     } else {            /* Case 4 */
         delete(prev_block);
         delete(next_block);
-        size += GET_SIZE(HDRP(prev_block)) + GET_SIZE(FTRP(next_block));
+        size += GET_SIZE(HDRP(prev_block)) + GET_SIZE(HDRP(next_block));
         PUT(HDRP(prev_block), PACK(size,0));
         PUT(FTRP(next_block), PACK(size,0));
         insert(prev_block, size);
@@ -211,7 +206,7 @@ void * find_fit(size_t asize)
     // iterate through free list to find list that fits block
     void *bp = NULL;
     // TODO: possibly search in reverse so we can split big blocks?
-    for (int i = NUM_LISTS; i < NUM_LISTS; i++) {
+    for (int i = idx; i < NUM_LISTS; i++) {
         void *bp = free_list[i];
         while (bp != NULL) {
             // if free block fits requested size, break and return
@@ -219,7 +214,7 @@ void * find_fit(size_t asize)
                 DEBUG_PRINTF("find_fit found fit block %x size %d\n", bp, GET_SIZE(HDRP(bp)));
                 // split block if i != idx 
                 // free block is in a list that holds blocks larger than needed
-                if (i != idx && GET_SIZE(HDRP(bp)) > asize + 2*DSIZE) bp = split_block(bp, asize);
+                //if (i != idx && GET_SIZE(HDRP(bp)) > asize + MINSIZE) bp = split_block(bp, asize);
                 return bp;
             }
             bp = PREV_FREE_BLK(bp);
@@ -236,18 +231,20 @@ void * find_fit(size_t asize)
 void *split_block(void *bp, size_t size) {
     int current_size = GET_SIZE(HDRP(bp));
     int remainder = current_size - size;
-    if (remainder < 2*DSIZE) {
+    if (remainder < MINSIZE) {
         // can't split block
         return bp;
     }   
 
+    DEBUG_PRINTF("split_block size %d remainder %d\n", size, remainder);
+
     delete(bp);
 
-    void *remainder_ptr = NEXT_BLKP(bp);
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
-    PUT(HDRP(remainder_ptr), PACK(size, 0));
-    PUT(FTRP(remainder_ptr), PACK(size, 0));
+    void *remainder_ptr = NEXT_BLKP(bp);
+    PUT(HDRP(remainder_ptr), PACK(remainder, 0));
+    PUT(FTRP(remainder_ptr), PACK(remainder, 0));
 
     insert(bp, size);
     insert(remainder_ptr, remainder);
@@ -275,6 +272,9 @@ void place(void* bp, size_t asize)
   /* Get the current block size */
   size_t bsize = GET_SIZE(HDRP(bp));
 
+  if (bsize > asize + MINSIZE) bp = split_block(bp, asize);
+
+  bsize = GET_SIZE(HDRP(bp));
   PUT(HDRP(bp), PACK(bsize, 1));
   PUT(FTRP(bp), PACK(bsize, 1));
 
@@ -296,7 +296,6 @@ void mm_free(void *bp)
 
     DEBUG_PRINTF("free: size=%d bytes\n", size);
 
-    // TODO: put node back in list
     insert(bp, size);
 
     coalesce(bp);
@@ -304,6 +303,8 @@ void mm_free(void *bp)
 
 
 void insert(void *bp, size_t size) {
+    if (bp == NULL) return;
+
     int idx = list_index(size);
 
     void *parent_ptr = free_list[idx];
@@ -343,6 +344,7 @@ void insert(void *bp, size_t size) {
 }
 
 void delete(void *bp) {
+    if (bp == NULL) return;
     int size = GET_SIZE(HDRP(bp));
     int idx = list_index(size);
 
@@ -394,32 +396,16 @@ void *mm_malloc(size_t size)
         asize = DSIZE * ((size + (DSIZE) + (DSIZE-1))/ DSIZE);
 
     DEBUG_PRINTF("malloc: size=%d bytes\n", size);
-    int idx = list_index(asize);
-
-    DEBUG_PRINTF("malloc list_idx %d\n", idx);
-
-    // iterate through free list to find list that fits block
-    // bp = free_list[idx];
-    // //void* pp = bp;
-    // // iterate through chosen list to find block that fits requested size
-    // for (int i = idx; i < NUM_LISTS; i++) {
-    //     while (bp != NULL && asize > GET_SIZE(HDRP(bp))) {
-    //         //pp = bp;
-    //         bp = PREV_BLK(bp);
-    //     } 
-    //     if (bp != NULL) break;
-    // }
+    DEBUG_PRINTF("malloc list_idx %d\n", list_index(asize));
 
     bp = find_fit(asize);
 
-    //bp = pp;
     // extend heap if we can't find the right size block
     if (bp == NULL) {
         extendsize = MAX(asize/WSIZE, CHUNKSIZE);
         if ((bp = extend_heap(extendsize)) == NULL)
             return NULL;       
     }
-
 
     mm_check();
     place(bp, asize);
