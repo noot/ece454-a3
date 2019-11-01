@@ -1,5 +1,6 @@
 /*
  * This package implements malloc, realloc, and free using segregated lists.
+ * Each block contains a 1 word header, 1 word footer, which each consist of size | allocation bit.
  * 
  */
 #include <stdio.h>
@@ -68,7 +69,7 @@ team_t team = {
 #define PREV_FREE_PTR(bp) ((char *)(bp))
 #define NEXT_FREE_PTR(bp) ((char *)(bp) + WSIZE)
 
-#define NUM_LISTS 20
+#define NUM_LISTS 28
 
 //#define DEBUG
 
@@ -137,6 +138,7 @@ void *coalesce(void *bp)
     void *prev_block = PREV_BLKP(bp);
     void *next_block = NEXT_BLKP(bp);
     if (prev_alloc && !next_alloc) { /* Case 2 */
+        DEBUG_PRINTF("coalescing current (size=%d) and next (size=%d)\n", size, GET_SIZE(HDRP(next_block)));
         delete(next_block);
         size += GET_SIZE(HDRP(next_block));
         PUT(HDRP(bp), PACK(size, 0));
@@ -144,6 +146,7 @@ void *coalesce(void *bp)
         insert(bp, size);
         return bp;
     } else if (!prev_alloc && next_alloc) { /* Case 3 */
+        DEBUG_PRINTF("coalescing current (size=%d) and prev (size=%d)\n", size, GET_SIZE(HDRP(prev_block)));
         delete(prev_block);
         size += GET_SIZE(HDRP(prev_block));
         PUT(FTRP(bp), PACK(size, 0));
@@ -151,6 +154,7 @@ void *coalesce(void *bp)
         insert(prev_block, size);
         return prev_block;
     } else {            /* Case 4 */
+        DEBUG_PRINTF("coalescing current (size=%d), next (size=%d), and prev (size=%d) blocks\n", size, GET_SIZE(HDRP(next_block)), GET_SIZE(HDRP(prev_block)));
         delete(prev_block);
         delete(next_block);
         size += GET_SIZE(HDRP(prev_block)) + GET_SIZE(HDRP(next_block));
@@ -229,8 +233,8 @@ void * find_fit(size_t asize)
 // the block minus `size`
 // add the remainder block to free list
 void *split_block(void *bp, size_t size) {
-    int current_size = GET_SIZE(HDRP(bp));
-    int remainder = current_size - size;
+    size_t current_size = GET_SIZE(HDRP(bp));
+    size_t remainder = current_size - size;
     if (remainder < MINSIZE) {
         // can't split block
         return bp;
@@ -257,7 +261,7 @@ int list_index(size_t size) {
     int i;
     for(i = 0; i < NUM_LISTS; i++) {
         size >>= 1;
-        if (size < 1) break;
+        if (size < 1 || i == NUM_LISTS-1) break;
     }
 
     return i;
@@ -269,16 +273,39 @@ int list_index(size_t size) {
  **********************************************************/
 void place(void* bp, size_t asize)
 {
-  /* Get the current block size */
-  size_t bsize = GET_SIZE(HDRP(bp));
+    /* Get the current block size */
+    size_t bsize = GET_SIZE(HDRP(bp));
 
-  if (bsize > asize + MINSIZE) bp = split_block(bp, asize);
+    delete(bp);
 
-  bsize = GET_SIZE(HDRP(bp));
-  PUT(HDRP(bp), PACK(bsize, 1));
-  PUT(FTRP(bp), PACK(bsize, 1));
+    size_t remainder = bsize - asize;
+    if (remainder < MINSIZE) {
+        // can't split block
+      PUT(HDRP(bp), PACK(bsize, 1));
+      PUT(FTRP(bp), PACK(bsize, 1));
+      return;
+    }   
 
-  delete(bp);
+    DEBUG_PRINTF("split_block size %d remainder %d\n", asize, remainder);
+
+    PUT(HDRP(bp), PACK(asize, 1));
+    PUT(FTRP(bp), PACK(asize, 1));
+    void *remainder_ptr = NEXT_BLKP(bp);
+    PUT(HDRP(remainder_ptr), PACK(remainder, 0));
+    PUT(FTRP(remainder_ptr), PACK(remainder, 0));
+
+    //insert(bp, size);
+    insert(remainder_ptr, remainder);
+
+    // if (bsize >= asize + MINSIZE) bp = split_block(bp, asize);
+
+    // DEBUG_PRINTF("place block ptr %x size %d\n", bp, asize);
+    // delete(bp);
+
+    // bsize = GET_SIZE(HDRP(bp));
+    // PUT(HDRP(bp), PACK(bsize, 1));
+    // PUT(FTRP(bp), PACK(bsize, 1));
+
 }
 
 /**********************************************************
@@ -323,35 +350,32 @@ void insert(void *bp, size_t size) {
         PUT(NEXT_FREE_PTR(child_ptr), bp);
         PUT(PREV_FREE_PTR(bp), child_ptr);
         PUT(NEXT_FREE_PTR(bp), parent_ptr);
-        return;
+        //return;
     } else if (child_ptr != NULL && parent_ptr == NULL) {
         PUT(PREV_FREE_PTR(bp), child_ptr);
         PUT(NEXT_FREE_PTR(child_ptr), bp);
         PUT(NEXT_FREE_PTR(bp), NULL);
-        return;
+        //return;
     } else if (child_ptr == NULL && parent_ptr != NULL) {
-        PUT(PREV_FREE_PTR(parent_ptr), bp);
         PUT(NEXT_FREE_PTR(bp), parent_ptr);
+        PUT(PREV_FREE_PTR(parent_ptr), bp);
         PUT(PREV_FREE_PTR(bp), NULL);
+        free_list[idx] = bp;
     } else {
         PUT(PREV_FREE_PTR(bp), NULL);
         PUT(NEXT_FREE_PTR(bp), NULL);
+        free_list[idx] = bp;
     }
 
     DEBUG_PRINTF("inserting into free list: size=%d bytes\n", size);
-
-    free_list[idx] = bp;
 }
 
 void delete(void *bp) {
     if (bp == NULL) return;
-    int size = GET_SIZE(HDRP(bp));
+    size_t size = GET_SIZE(HDRP(bp));
     int idx = list_index(size);
 
-    //void *list_head = free_list[idx];
-
     // child <- bp <- parent <- ... <- list_head
-
     void *parent = PREV_FREE_BLK(bp);
     void *child = NEXT_FREE_BLK(bp);
     if (parent != NULL && child != NULL) {
@@ -407,8 +431,11 @@ void *mm_malloc(size_t size)
             return NULL;       
     }
 
-    mm_check();
     place(bp, asize);
+    if(mm_check() != 0) {
+        printf("mm_check failed :(");
+        PUT(0x1, 0);
+    }
 
     return bp;
 
@@ -452,10 +479,9 @@ void *mm_realloc(void *ptr, size_t size)
         if (!GET_SIZE(HDRP(NEXT_BLKP(ptr))) || !GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) {
             // check if the extra amount of space we need is greater than what's in the next block
             extra = diff - GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-            // if it's greater, 
             if (extra > 0) {
                 int extension = MAX(extra, DSIZE);
-                if (extend_heap(extra) == NULL) {
+                if (extend_heap(extra/WSIZE) == NULL) {
                     printf("cannot extend heap");
                     return NULL;
                 }
@@ -474,16 +500,6 @@ void *mm_realloc(void *ptr, size_t size)
         }
     }
 
-    // newptr = mm_malloc(size);
-    // if (newptr == NULL)
-    //   return NULL;
-
-    // /* Copy the old data. */
-    //copySize = GET_SIZE(HDRP(oldptr));
-    // if (size < copySize)
-    //   copySize = size;
-    // memcpy(newptr, oldptr, copySize);
-    // mm_free(oldptr);
     return newptr;
 }
 
@@ -492,10 +508,30 @@ void *mm_realloc(void *ptr, size_t size)
  * Check the consistency of the memory heap
  * Return nonzero if the heap is consistant.
  *********************************************************/
-int mm_check(void){
-    // char *bp = heap_listp;
+int mm_check(){
+    if (free_list_check() != 0) return 1;
 
-    //DEBUG_PRINTF("heap");
+    return 0;
+}
+
+int free_list_check() {
+    for (int i = 0; i < NUM_LISTS; i++) {
+        void *ptr = free_list[i];
+        while (ptr != NULL) {
+            //DEBUG_PRINTF("free block idx %d 0x%x size %d\n", i, ptr, GET_SIZE(HDRP(ptr)));
+            if (GET_ALLOC(HDRP(ptr))) {
+                DEBUG_PRINTF("free list check failed: block was allocated");
+                return 1; 
+            }
+            size_t size = GET_SIZE(HDRP(ptr));
+            if (size >= 1<<(i+1)) {
+                DEBUG_PRINTF("free list check failed: size=%d should be between %d to %d", size, 1<<i, (1<<i)-1);
+                return 1;
+            }
+
+            ptr = PREV_FREE_BLK(ptr);
+        }
+    }
 
     return 0;
 }
