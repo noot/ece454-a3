@@ -71,7 +71,7 @@ team_t team = {
 
 #define NUM_LISTS 28
 
-//#define DEBUG
+#define DEBUG
 
 #ifdef DEBUG
     #define DEBUG_PRINTF(...) printf(__VA_ARGS__)
@@ -459,45 +459,102 @@ void *mm_realloc(void *ptr, size_t size)
 
     //void *oldptr = ptr;
     void *newptr = NULL;
-    // //size_t copySize;
-    size_t newSize = size;
+    size_t origSize = size;
 
-    if (newSize < DSIZE) {
-        newSize = DSIZE;
+    if (size < DSIZE) {
+        size = DSIZE;
     } else {
-        newSize = DSIZE * ((newSize + (DSIZE) + (DSIZE-1))/ DSIZE);
+        size = DSIZE * ((size + (DSIZE) + (DSIZE-1))/ DSIZE);
     }
 
-    newSize += CHUNKSIZE;
+    //size += CHUNKSIZE;
+
+    DEBUG_PRINTF("realloc oldsize %d newsize %d\n", origSize, size);
+
+    size_t current_block_size = GET_SIZE(HDRP(ptr));
 
     // size diff between current allocated size and requested size
-    int diff = newSize - GET_SIZE(HDRP(ptr));
+    size_t diff = size - current_block_size;
 
     if (diff > 0) {
-        int extra;
-        // check if next block is epilogue, if so, extend the heap
-        if (!GET_SIZE(HDRP(NEXT_BLKP(ptr))) || !GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) {
-            // check if the extra amount of space we need is greater than what's in the next block
-            extra = diff - GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-            if (extra > 0) {
-                int extension = MAX(extra, DSIZE);
-                if (extend_heap(extra/WSIZE) == NULL) {
-                    printf("cannot extend heap");
+        // need extra space, check if next block is allocated
+        if (!GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) {
+            size_t next_block_size = GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+            // next block isn't allocated, merge it with this one
+            // but first, check if it's the epilogue block 
+            if (next_block_size == 0) {
+                DEBUG_PRINTF("realloc extend heap size %d", MAX(diff, CHUNKSIZE));
+                if(extend_heap(MAX(diff, CHUNKSIZE)) == NULL) {
+                    // fail
                     return NULL;
                 }
-
-               extra += extension;
             }
 
-            // put block header
-            PUT(HDRP(ptr), PACK(newSize + extra, 1));
-            // put block footer
-            PUT(FTRP(ptr), PACK(newSize + extra, 1));
+            // next block doesn't have enough space, check if next block after is free
+            if (next_block_size < diff) {
+                DEBUG_PRINTF("realloc next block free but cannot fit\n");
+                size_t block_after_next_size = GET_SIZE(HDRP(NEXT_BLKP(NEXT_BLKP(ptr))));
+                if (!GET_ALLOC(HDRP(NEXT_BLKP(NEXT_BLKP(ptr)))) && block_after_next_size + next_block_size > diff) {
+                    delete(NEXT_BLKP(ptr));
+                    delete(NEXT_BLKP(NEXT_BLKP(ptr)));
+                    PUT(HDRP(ptr), PACK(current_block_size + diff, 1));
+                    PUT(FTRP(ptr), PACK(current_block_size + diff, 1));  
+                } else {
+                    // block after next block is allocated
+                    newptr = mm_malloc(size);
+                    memmove(newptr, ptr, MIN(size, origSize));
+                    mm_free(ptr);            
+                }
+            } else {
+                DEBUG_PRINTF("realloc next block can fit: next_block_size %d diff %d\n", next_block_size, diff);
+                delete(NEXT_BLKP(ptr));
+                PUT(HDRP(ptr), PACK(current_block_size + diff, 1));
+                PUT(FTRP(ptr), PACK(current_block_size + diff, 1));
+
+            }
         } else {
-            newptr = mm_malloc(newSize - DSIZE);
-            memmove(newptr, ptr, MIN(size, newSize));
-            mm_free(ptr);   
+            // next block is allocated, need to find a new space to allocate
+            newptr = mm_malloc(size);
+            memmove(newptr, ptr, MIN(size, origSize));
+            mm_free(ptr);
         }
+    } else {
+        // don't need extra space
+        // TODO: split current block if possible
+    }
+
+    // if (diff > 0) {
+    //     int extra;
+    //     // check if next block is epilogue, if so, extend the heap
+    //     if (!GET_SIZE(HDRP(NEXT_BLKP(ptr))) || !GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) {
+    //         // check if the extra amount of space we need is greater than what's in the next block
+    //         extra = diff - GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+    //         if (extra > 0) {
+    //             int extension = MAX(extra/WSIZE, CHUNKSIZE);
+    //             if (extend_heap(extra) == NULL) {
+    //                 printf("cannot extend heap");
+    //                 return NULL;
+    //             }
+
+    //            extra += extension;
+    //         }
+
+    //         delete(NEXT_BLKP(ptr));
+
+    //         // put block header
+    //         PUT(HDRP(ptr), PACK(size + extra, 1));
+    //         // put block footer
+    //         PUT(FTRP(ptr), PACK(size + extra, 1));
+    //     } else {
+    //         newptr = mm_malloc(size - DSIZE);
+    //         memmove(newptr, ptr, size);
+    //         mm_free(ptr);   
+    //     }
+    // }
+
+    if(mm_check() != 0) {
+        printf("mm_check failed :(");
+        PUT(0x1, 0);
     }
 
     return newptr;
