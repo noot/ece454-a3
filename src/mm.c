@@ -458,8 +458,7 @@ void *mm_realloc(void *ptr, size_t size)
       return (mm_malloc(size));
 
     //void *oldptr = ptr;
-    void *newptr = NULL;
-    size_t origSize = size;
+    void *newptr = ptr;
 
     if (size < DSIZE) {
         size = DSIZE;
@@ -467,90 +466,67 @@ void *mm_realloc(void *ptr, size_t size)
         size = DSIZE * ((size + (DSIZE) + (DSIZE-1))/ DSIZE);
     }
 
-    //size += CHUNKSIZE;
+    //size += MINSIZE;
 
-    DEBUG_PRINTF("realloc oldsize %d newsize %d\n", origSize, size);
-
-    size_t current_block_size = GET_SIZE(HDRP(ptr));
+    size_t original_block_size = GET_SIZE(HDRP(ptr));
+    DEBUG_PRINTF("realloc oldsize %d newsize %d\n", original_block_size, size);
 
     // size diff between current allocated size and requested size
-    size_t diff = size - current_block_size;
+    size_t diff = size - original_block_size;
 
-    if (diff > 0) {
-        // need extra space, check if next block is allocated
-        if (!GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) {
-            size_t next_block_size = GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-            // next block isn't allocated, merge it with this one
-            // but first, check if it's the epilogue block 
-            if (next_block_size == 0) {
-                DEBUG_PRINTF("realloc extend heap size %d", MAX(diff, CHUNKSIZE));
-                if(extend_heap(MAX(diff, CHUNKSIZE)) == NULL) {
-                    // fail
-                    return NULL;
-                }
-            }
-
-            // next block doesn't have enough space, check if next block after is free
-            if (next_block_size < diff) {
-                DEBUG_PRINTF("realloc next block free but cannot fit\n");
-                size_t block_after_next_size = GET_SIZE(HDRP(NEXT_BLKP(NEXT_BLKP(ptr))));
-                if (!GET_ALLOC(HDRP(NEXT_BLKP(NEXT_BLKP(ptr)))) && block_after_next_size + next_block_size > diff) {
-                    delete(NEXT_BLKP(ptr));
-                    delete(NEXT_BLKP(NEXT_BLKP(ptr)));
-                    PUT(HDRP(ptr), PACK(current_block_size + diff, 1));
-                    PUT(FTRP(ptr), PACK(current_block_size + diff, 1));  
-                } else {
-                    // block after next block is allocated
-                    newptr = mm_malloc(size);
-                    memmove(newptr, ptr, MIN(size, origSize));
-                    mm_free(ptr);            
-                }
-            } else {
-                DEBUG_PRINTF("realloc next block can fit: next_block_size %d diff %d\n", next_block_size, diff);
-                delete(NEXT_BLKP(ptr));
-                PUT(HDRP(ptr), PACK(current_block_size + diff, 1));
-                PUT(FTRP(ptr), PACK(current_block_size + diff, 1));
-
-            }
-        } else {
-            // next block is allocated, need to find a new space to allocate
-            newptr = mm_malloc(size);
-            memmove(newptr, ptr, MIN(size, origSize));
-            mm_free(ptr);
-        }
-    } else {
-        // don't need extra space
-        // TODO: split current block if possible
+    if (diff < 0) {
+        return newptr;
     }
 
-    // if (diff > 0) {
-    //     int extra;
-    //     // check if next block is epilogue, if so, extend the heap
-    //     if (!GET_SIZE(HDRP(NEXT_BLKP(ptr))) || !GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) {
-    //         // check if the extra amount of space we need is greater than what's in the next block
-    //         extra = diff - GET_SIZE(HDRP(NEXT_BLKP(ptr)));
-    //         if (extra > 0) {
-    //             int extension = MAX(extra/WSIZE, CHUNKSIZE);
-    //             if (extend_heap(extra) == NULL) {
-    //                 printf("cannot extend heap");
-    //                 return NULL;
-    //             }
+    // need extra space, check if next block is allocated
+    if (!GET_ALLOC(HDRP(NEXT_BLKP(ptr)))) {
+        size_t next_block_size = GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+        // next block isn't allocated, merge it with this one
+        // but first, check if it's the epilogue block 
+        size_t epilogue_header = PACK(0, 1);
+        if (HDRP(NEXT_BLKP(ptr)) == epilogue_header) {
+            DEBUG_PRINTF("realloc extend heap size %d\n", MAX(diff/WSIZE, MINSIZE));
+            if(extend_heap(MAX(diff/WSIZE, MINSIZE)) == NULL) {
+                return NULL;
+            }
+            delete(NEXT_BLKP(ptr));
+            PUT(HDRP(ptr), PACK(original_block_size + diff, 1));
+            PUT(FTRP(ptr), PACK(original_block_size + diff, 1));
+            return ptr;
+        }
 
-    //            extra += extension;
-    //         }
+        //next_block_size = GET_SIZE(HDRP(NEXT_BLKP(ptr)));
+        //DEBUG_PRINTF("realloc next block size %d\n", next_block_size);
+        // next block doesn't have enough space, check if next block after is free
+        if (next_block_size < diff) {
+            DEBUG_PRINTF("realloc next block free but cannot fit\n");
+            // size_t block_after_next_size = GET_SIZE(HDRP(NEXT_BLKP(NEXT_BLKP(ptr))));
+            // if (!GET_ALLOC(HDRP(NEXT_BLKP(NEXT_BLKP(ptr)))) && block_after_next_size + next_block_size > diff) {
+            //     delete(NEXT_BLKP(ptr));
+            //     delete(NEXT_BLKP(NEXT_BLKP(ptr)));
+            //     PUT(HDRP(ptr), PACK(current_block_size + diff, 1));
+            //     PUT(FTRP(ptr), PACK(current_block_size + diff, 1));  
+            // } else {
+                // block after next block is allocated
+                // newptr = mm_malloc(size);
+                // DEBUG_PRINTF("memmove\n");
+                // memcpy(newptr, ptr, original_block_size);
+                // mm_free(ptr);            
+            //}
+        } else {
+            DEBUG_PRINTF("realloc next block can fit: next_block_size %d diff %d\n", next_block_size, diff);
+            delete(NEXT_BLKP(ptr));
+            PUT(HDRP(ptr), PACK(original_block_size + diff, 1));
+            PUT(FTRP(ptr), PACK(original_block_size + diff, 1));
+            return ptr;
+        }
+    } 
 
-    //         delete(NEXT_BLKP(ptr));
-
-    //         // put block header
-    //         PUT(HDRP(ptr), PACK(size + extra, 1));
-    //         // put block footer
-    //         PUT(FTRP(ptr), PACK(size + extra, 1));
-    //     } else {
-    //         newptr = mm_malloc(size - DSIZE);
-    //         memmove(newptr, ptr, size);
-    //         mm_free(ptr);   
-    //     }
-    // }
+    // next block is allocated or not big enough, need to find a new space to allocate
+    newptr = mm_malloc(size);
+    if (newptr == NULL) return NULL;
+    memcpy(newptr, ptr, original_block_size);
+    mm_free(ptr);
 
     if(mm_check() != 0) {
         printf("mm_check failed :(");
